@@ -1,0 +1,36 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# CryptoFlow — Python Dependencies
+#
+# Install everything with:  pip install -r requirements.txt
+#
+# Why pin versions (>=x.x)?
+#   Pinning ensures anyone who clones your repo gets a compatible version.
+#   Not pinning at all means a new release could silently break your pipeline.
+#   For a portfolio project, >= (minimum version) is fine. In production you'd
+#   pin exact versions (==x.x.x) and use a lock file.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# HTTP client — fetches data from the CoinGecko API
+requests>=2.31.0
+
+# Retry logic — handles transient API failures with exponential backoff
+tenacity>=8.2.0
+
+# Data manipulation — cleans, transforms, and models the raw API data
+pandas>=2.0.0
+
+# Database ORM — abstracts the PostgreSQL connection so we're not writing
+# raw connection strings everywhere
+sqlalchemy>=2.0.0
+
+# PostgreSQL driver — the actual adapter Python uses to talk to PostgreSQL
+psycopg2-binary>=2.9.0
+
+# Pipeline orchestration — schedules and monitors the daily ETL run
+apache-airflow>=2.9.0
+
+# Environment variable loader — reads .env file into os.environ at runtime
+python-dotenv>=1.0.0
+
+# Testing framework — runs our unit tests with a single command
+pytest>=8.0.0
