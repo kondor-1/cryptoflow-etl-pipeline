@@ -3,24 +3,16 @@
 # Defines all services needed to run the CryptoFlow pipeline locally.
 #
 # Services:
-#   cryptoflow-db   — PostgreSQL database for our data (bronze/silver/gold)
-#   airflow-db      — PostgreSQL database for Airflow's internal metadata
-#   airflow-init    — One-time setup: creates Airflow tables and admin user
-#   airflow-webserver — Airflow UI at http://localhost:8080
-#   airflow-scheduler — Runs the DAGs on schedule
-#
-# 📚 CONCEPT: Why two separate databases?
-#   Airflow needs its own PostgreSQL to store DAG runs, task states,
-#   logs, and connections. This is completely separate from our
-#   cryptoflow data. Mixing them would make both harder to manage.
+#   cryptoflow-db       — PostgreSQL database for our data (bronze/silver/gold)
+#   airflow-db          — PostgreSQL database for Airflow's internal metadata
+#   airflow-init        — One-time setup: creates Airflow tables and admin user
+#   airflow-webserver   — Airflow UI at http://localhost:8080
+#   airflow-scheduler   — Runs the DAGs on schedule
+#   dashboard           — Streamlit dashboard at http://localhost:8501
 
 version: '3.8'
 
 x-airflow-common:
-  # 📚 CONCEPT: YAML anchors (&) and aliases (*)
-  #   This block defines shared config that both airflow services use.
-  #   Without this we would repeat the same environment variables,
-  #   volumes, and depends_on in both webserver and scheduler.
   &airflow-common
   build: .
   environment:
@@ -30,7 +22,6 @@ x-airflow-common:
     AIRFLOW__CORE__FERNET_KEY: ''
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
-    # CryptoFlow DB connection — passed to our ETL code via env vars
     PYTHONPATH: /opt/airflow
     DB_HOST: cryptoflow-db
     DB_PORT: 5432
@@ -43,7 +34,6 @@ x-airflow-common:
   volumes:
     - ./dags:/opt/airflow/dags
     - ./etl:/opt/airflow/etl
-    - ./logs:/opt/airflow/logs
   depends_on:
     airflow-db:
       condition: service_healthy
@@ -61,11 +51,10 @@ services:
       POSTGRES_PASSWORD: cryptoflow
       POSTGRES_DB: cryptoflow
     ports:
-      - "5433:5432"   # 📚 Port 5433 on host to avoid conflict with your
-                      # local PostgreSQL which already uses 5432
+      - "5433:5432"
     volumes:
       - cryptoflow_db_data:/var/lib/postgresql/data
-      - ./sql:/docker-entrypoint-initdb.d   # Auto-runs SQL files on first start
+      - ./sql:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "cryptoflow"]
       interval: 5s
@@ -123,6 +112,31 @@ services:
     container_name: airflow-scheduler
     command: scheduler
     restart: always
+
+  # ── Streamlit Dashboard ────────────────────────────────────────────────────
+  dashboard:
+    image: python:3.11-slim
+    container_name: cryptoflow-dashboard
+    working_dir: /app
+    command: >
+      bash -c "pip install -r dashboard/requirements.txt -q &&
+               streamlit run dashboard/app.py
+               --server.port=8501
+               --server.address=0.0.0.0
+               --server.headless=true"
+    volumes:
+      - ./dashboard:/app/dashboard
+    ports:
+      - "8501:8501"
+    environment:
+      DB_HOST: cryptoflow-db
+      DB_PORT: 5432
+      DB_NAME: cryptoflow
+      DB_USER: cryptoflow
+      DB_PASSWORD: cryptoflow
+    depends_on:
+      cryptoflow-db:
+        condition: service_healthy
 
 volumes:
   cryptoflow_db_data:
