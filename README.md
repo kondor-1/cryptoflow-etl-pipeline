@@ -284,6 +284,10 @@ ORDER BY f.pct_change_7d DESC
 LIMIT 10;
 ```
 
+## Pipeline in Action
+<img width="1893" height="876" alt="image" src="https://github.com/user-attachments/assets/d4da3be6-a90f-4d9e-a1af-d2b28f91cf68" />
+
+
 ---
 
 ## Roadmap
