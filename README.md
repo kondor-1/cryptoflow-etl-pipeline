@@ -1,50 +1,136 @@
 # CryptoFlow ETL Pipeline
 
-> A local end-to-end ETL pipeline that ingests live cryptocurrency market data
-> from the CoinGecko public API, transforms it through a three-layer Medallion
-> architecture, and loads it into a PostgreSQL data warehouse — orchestrated
-> daily by Apache Airflow.
+![Python](https://img.shields.io/badge/Python-3.11-blue)
+![Airflow](https://img.shields.io/badge/Airflow-2.9-green)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-blue)
+![Docker](https://img.shields.io/badge/Docker-Compose-2496ED)
+![Tests](https://img.shields.io/badge/Tests-14%20passing-brightgreen)
+
+A production-style daily ELT pipeline that ingests live cryptocurrency market data for the top 300 coins from the CoinGecko REST API, transforms it through a Medallion architecture, and loads it into a Kimball star schema in PostgreSQL — fully orchestrated by Apache Airflow and containerized with Docker.
 
 ---
 
 ## Architecture
 
 ```
-CoinGecko API  →  Extract  →  Bronze (raw)  →  Transform  →  Silver (staging)  →  Gold (warehouse)
-                                                                                         ↓
-                                                                               Airflow DAG (daily)
-```
-
-**Medallion layers** (all inside a single PostgreSQL database):
-
-| Layer  | Schema      | Description                                      |
-|--------|-------------|--------------------------------------------------|
-| Bronze | `raw`       | Raw API response stored as-is, TEXT columns      |
-| Silver | `staging`   | Cleaned, typed, validated data                   |
-| Gold   | `warehouse` | Kimball star schema — optimised for analytics    |
-
-**Star Schema (Gold layer):**
-
-```
-             dim_date
-                │
-dim_coin ── fact_market_snapshot ── dim_market_tier
+┌─────────────────────────────────────────────────────────────────────┐
+│                         DATA SOURCES                                │
+│                                                                     │
+│              CoinGecko REST API (public, no key required)           │
+│              GET /coins/markets — 300 coins, 3 pages/day            │
+└──────────────────────────────┬──────────────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                    BRONZE LAYER — raw schema                        │
+│                                                                     │
+│   raw.api_response                                                  │
+│   All TEXT columns — full audit trail, no type casting              │
+│   append-only — every run adds new rows                             │
+└──────────────────────────────┬──────────────────────────────────────┘
+                               │  clean + cast + deduplicate
+                               ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                    SILVER LAYER — staging schema                    │
+│                                                                     │
+│   staging.market_data_clean                                         │
+│   Typed columns — NUMERIC, TIMESTAMPTZ, INTEGER                     │
+│   Deduplicated on (coingecko_id, last_updated)                      │
+└──────────────────────────────┬──────────────────────────────────────┘
+                               │  model into star schema
+                               ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                    GOLD LAYER — warehouse schema                    │
+│                                                                     │
+│   warehouse.dim_date          warehouse.dim_coin                    │
+│   date_id (YYYYMMDD)          coin_id (BIGSERIAL surrogate PK)      │
+│   day/month/quarter attrs     coingecko_id (natural key)            │
+│   is_weekend flag             symbol, name (SCD Type 1)             │
+│                                                                     │
+│   warehouse.dim_market_tier   warehouse.fact_market_snapshot        │
+│   tier_id 1-4                 grain: one row per coin per day       │
+│   Mega/Large/Mid/Small Cap    FKs to all 3 dims                     │
+│   static seed data            price, volume, market cap, pct change │
+└─────────────────────────────────────────────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                         ORCHESTRATION                               │
+│                                                                     │
+│   Apache Airflow — cryptoflow_daily DAG (@daily)                    │
+│                                                                     │
+│   extract_to_bronze                                                 │
+│        >> transform_and_load_silver                                 │
+│             >> load_dimensions                                      │
+│                  >> build_and_load_fact                             │
+│                       >> validate_pipeline                          │
+│                                                                     │
+│   retries=2, retry_delay=5min, catchup=False                        │
+└─────────────────────────────────────────────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                         INFRASTRUCTURE                              │
+│                                                                     │
+│   Docker Compose — 5 services                                       │
+│   cryptoflow-db  (PostgreSQL 16, port 5433)                         │
+│   airflow-db     (PostgreSQL 16, internal only)                     │
+│   airflow-init   (one-time setup)                                   │
+│   airflow-webserver  (port 8080)                                    │
+│   airflow-scheduler  (runs DAGs on schedule)                        │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## Tech Stack
 
-| Tool              | Purpose                             |
-|-------------------|-------------------------------------|
-| Python 3.10+      | ETL logic                           |
-| Pandas            | Data transformation                 |
-| requests          | CoinGecko API client                |
-| tenacity          | Retry with exponential backoff      |
-| PostgreSQL        | Data warehouse (local)              |
-| SQLAlchemy        | Database connection layer           |
-| Apache Airflow    | Pipeline orchestration & scheduling |
-| pytest            | Unit testing                        |
+| Layer | Technology |
+|---|---|
+| Language | Python 3.11 |
+| Extraction | requests, tenacity (exponential backoff) |
+| Transformation | pandas |
+| Loading | SQLAlchemy, psycopg2 |
+| Orchestration | Apache Airflow 2.9 |
+| Database | PostgreSQL 16 |
+| Containerization | Docker, Docker Compose |
+| Testing | pytest (14 unit tests) |
+| Configuration | python-dotenv |
+
+---
+
+## Data Model
+
+The Gold layer implements a **Kimball star schema** with the following grain:
+
+> One row per coin per day in `fact_market_snapshot`
+
+```
+                    dim_date
+                   (date_id PK)
+                       │
+                       │ FK
+                       ▼
+dim_coin ──FK──► fact_market_snapshot ◄──FK── dim_market_tier
+(coin_id PK)    (snapshot_id PK)              (tier_id PK)
+                (date_id FK)                  Mega Cap   rank 1-10
+                (coin_id FK)                  Large Cap  rank 11-50
+                (tier_id FK)                  Mid Cap    rank 51-150
+                ── price_usd                  Small Cap  rank 151-250
+                ── market_cap_usd
+                ── volume_24h_usd
+                ── pct_change_24h
+                ── pct_change_7d
+                ── circulating_supply
+                ── market_cap_rank
+```
+
+**Key design decisions:**
+- Surrogate keys (BIGSERIAL) in warehouse dims — decoupled from source system IDs
+- Natural key (`coingecko_id`) preserved as UNIQUE constraint in `dim_coin`
+- SCD Type 1 on `dim_coin` — coin name/symbol changes overwrite old values
+- Idempotent upserts via `INSERT ... ON CONFLICT DO UPDATE` — safe to re-run
+- `dim_market_tier` is a static seed dimension — never changes at runtime
 
 ---
 
@@ -52,126 +138,166 @@ dim_coin ── fact_market_snapshot ── dim_market_tier
 
 ```
 cryptoflow-etl-pipeline/
-├── README.md
-├── requirements.txt
-├── .env.example
+├── Dockerfile                  Custom Airflow image with project deps
+├── docker-compose.yml          5-service stack definition
+├── .dockerignore               Excludes .env, .venv, logs from image
+├── requirements.txt            Python dependencies
+├── .env.example                Environment variable template
 ├── .gitignore
-├── docs/
-│   ├── project_plan.docx
-│   └── data_dictionary.md
+├── README.md
+│
 ├── etl/
-│   ├── extract.py       # CoinGecko API client
-│   ├── transform.py     # Cleaning + dimensional modeling
-│   └── load.py          # PostgreSQL upsert loader
-├── sql/
-│   ├── create_schemas.sql
-│   ├── create_tables.sql
-│   ├── seed_dimensions.sql
-│   └── analytics_queries.sql
+│   ├── extract.py              CoinGecko API client, pagination, retry
+│   ├── transform.py            Bronze→Silver→Gold transformation logic
+│   └── load.py                 PostgreSQL upsert for all 4 tables
+│
 ├── dags/
-│   └── cryptoflow_dag.py
-└── tests/
-    ├── test_extract.py
-    └── test_transform.py
+│   └── cryptoflow_dag.py       Airflow DAG — 5 tasks, @daily schedule
+│
+├── sql/
+│   ├── 01_create_schemas.sql   raw, staging, warehouse schemas
+│   ├── 02_create_tables.sql    All 6 tables with indexes and constraints
+│   ├── 03_seed_dimensions.sql  dim_market_tier static data
+│   └── analytics_queries.sql  5 analytical SQL queries
+│
+├── tests/
+│   ├── test_extract.py         7 unit tests for extract module
+│   └── test_transform.py       14 unit tests for transform module
+│
+└── docs/
+    └── naming_conventions.md   SQL, Python, Git naming standards
 ```
 
 ---
 
-## Setup & Run
+## Quickstart
 
 ### Prerequisites
-- Python 3.10+
-- PostgreSQL running locally
+- Docker Desktop running
 - Git
 
 ### 1. Clone the repo
 ```bash
-git clone https://github.com/YOUR_USERNAME/cryptoflow-etl-pipeline.git
+git clone https://github.com/kondor-1/cryptoflow-etl-pipeline.git
 cd cryptoflow-etl-pipeline
 ```
 
-### 2. Create a virtual environment and install dependencies
-```bash
-python -m venv venv
-source venv/bin/activate        # On Windows: venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-### 3. Configure environment variables
+### 2. Configure environment
 ```bash
 cp .env.example .env
-# Edit .env with your PostgreSQL credentials
+# No changes needed for local Docker setup — defaults work out of the box
 ```
 
-### 4. Set up the database
+### 3. Start the stack
 ```bash
-# Create the database first
-psql -U postgres -c "CREATE DATABASE cryptoflow;"
-
-# Run the setup SQL scripts in order
-psql -U postgres -d cryptoflow -f sql/create_schemas.sql
-psql -U postgres -d cryptoflow -f sql/create_tables.sql
-psql -U postgres -d cryptoflow -f sql/seed_dimensions.sql
+docker compose up --build
 ```
 
-### 5. Run the pipeline manually (without Airflow)
-```bash
-python -c "
-from etl.extract import fetch_all_coins
-from etl.transform import run_transforms
-from etl.load import load_all
-data = fetch_all_coins()
-transformed = run_transforms(data)
-load_all(transformed)
-print('Pipeline complete.')
-"
+First run takes 3-5 minutes to download images and build. When you see:
 ```
-
-### 6. Run with Airflow
-```bash
-export AIRFLOW_HOME=~/airflow
-airflow standalone   # Starts web server + scheduler
-# Visit http://localhost:8080 — default login: admin / (printed in terminal)
-# Enable the 'cryptoflow_daily' DAG and trigger a run
+airflow-webserver | [INFO] Listening at: http://0.0.0.0:8080
 ```
+The stack is ready.
 
-### 7. Run tests
+### 4. Open Airflow UI
+Go to **http://localhost:8080**
+- Username: `admin`
+- Password: `admin`
+
+### 5. Run the pipeline
+1. Find `cryptoflow_daily` in the DAG list
+2. Toggle it on (click the switch on the left)
+3. Click the ▶ button to trigger a manual run
+4. Watch all 5 tasks turn green
+
+### 6. Connect to the database
+Use any PostgreSQL client (pgAdmin, DBeaver, psql):
+- Host: `localhost`
+- Port: `5433`
+- Database: `cryptoflow`
+- Username: `cryptoflow`
+- Password: `cryptoflow`
+
+---
+
+## Running Tests
+
 ```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Run all unit tests
 pytest tests/ -v
 ```
+
+Expected output:
+```
+tests/test_extract.py::TestSaveToBronze::test_dataframe_has_correct_columns PASSED
+tests/test_extract.py::TestSaveToBronze::test_columns_renamed_correctly PASSED
+...
+14 passed in 81s
+```
+
+---
+
+## Key Engineering Decisions
+
+**Why Medallion architecture?**
+Clear separation between raw (audit trail), clean (typed), and modeled (analytics-ready) data. Each layer has a single responsibility and can be rebuilt independently if upstream logic changes.
+
+**Why Kimball star schema in the Gold layer?**
+Optimized for analytical queries — simple joins, pre-aggregated dimensions, consistent grain. The fact table answers "what happened to coin X on date Y" with a single row lookup.
+
+**Why Python transforms instead of SQL/dbt?**
+At this data volume (300 rows/day), Python/pandas is more testable — unit tests run without a database connection. In a production system at scale, Gold layer transforms would move to dbt models for better lineage and maintainability.
+
+**Why two separate PostgreSQL instances in Docker?**
+Airflow's metadata (DAG runs, task states, logs) is completely separate from the pipeline data. Mixing them would couple two independent concerns and complicate backups and scaling.
+
+**Why `INSERT ... ON CONFLICT DO UPDATE` instead of DELETE + INSERT?**
+Idempotency. The pipeline can be re-run any number of times and always produces the same result. DELETE + INSERT risks data loss if the process fails between the two operations.
+
+**Why exponential backoff on the CoinGecko API?**
+CoinGecko's public API rate-limits at ~10 requests/minute. Exponential backoff (10s, 20s, 40s...) gives the API time to recover without hammering it repeatedly, which would extend the rate limit window.
 
 ---
 
 ## Analytics Queries
 
-After running the pipeline, connect to the database and run the queries in
-`sql/analytics_queries.sql`. They answer:
+Sample queries available in `sql/analytics_queries.sql`:
 
-1. Top 10 coins by average market cap (last 30 days)
-2. Bitcoin & Ethereum daily price volatility (last 90 days)
-3. Market tier breakdown on the most recent snapshot date
-4. 7-day biggest winners and losers
-5. Pipeline health check — daily ingestion counts
+```sql
+-- Top 10 coins by market cap today
+SELECT c.name, f.price_usd, f.market_cap_usd, f.market_cap_rank
+FROM warehouse.fact_market_snapshot f
+JOIN warehouse.dim_coin c ON f.coin_id = c.coin_id
+WHERE f.date_id = TO_CHAR(CURRENT_DATE, 'YYYYMMDD')::INTEGER
+ORDER BY f.market_cap_rank
+LIMIT 10;
+
+-- 7-day price change leaders
+SELECT c.name, f.pct_change_7d
+FROM warehouse.fact_market_snapshot f
+JOIN warehouse.dim_coin c ON f.coin_id = c.coin_id
+WHERE f.date_id = TO_CHAR(CURRENT_DATE, 'YYYYMMDD')::INTEGER
+ORDER BY f.pct_change_7d DESC
+LIMIT 10;
+```
 
 ---
 
-## Data Source
+## Roadmap
 
-**CoinGecko Public API** — No API key required.
-
-- Endpoint: `GET /coins/markets?vs_currency=usd&per_page=100`
-- Covers top 250 coins by market cap
-- Rate limit: ~30 requests/minute (pipeline uses 3 calls/day)
-- Docs: https://docs.coingecko.com/reference/introduction
+- [ ] AWS migration: S3 (bronze), Glue Jobs (transform), Redshift Serverless (warehouse)
+- [ ] Lambda + EventBridge to replace Airflow scheduler in cloud
+- [ ] dbt models for Gold layer transformations
+- [ ] Metabase dashboard connected to warehouse
+- [ ] Historical backfill (365 days OHLCV data)
 
 ---
 
-## Build Status
+## Author
 
-- [x] Phase 0 — Project specification & architecture
-- [x] Phase 1 — Database setup (schemas, tables, seed data)
-- [ ] Phase 2 — Extract (CoinGecko API client)
-- [ ] Phase 3 — Transform (cleaning + star schema build)
-- [ ] Phase 4 — Load (PostgreSQL upsert)
-- [ ] Phase 5 — Orchestration (Airflow DAG)
-- [ ] Phase 6 — Analytics queries + unit tests
+**Alessandro Xavier Kon López**
+Data Engineer
+[github.com/kondor-1](https://github.com/kondor-1) · alessandroxavierk@gmail.com
