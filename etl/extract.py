@@ -11,7 +11,7 @@ Those concerns belong to transform.py.
 import os
 import logging
 from datetime import datetime, timezone
-
+import time
 import requests
 import pandas as pd
 from tenacity import (
@@ -59,7 +59,7 @@ logger = logging.getLogger(__name__)
 @retry(
     retry=retry_if_exception_type(requests.HTTPError),
     stop=stop_after_attempt(5),
-    wait=wait_exponential(multiplier=1, min=2, max=60),
+    wait=wait_exponential(multiplier=2, min=10, max=60),
     before_sleep=before_sleep_log(logger, logging.WARNING),
     reraise=True,
 )
@@ -123,6 +123,9 @@ def fetch_all_coins(pages: int = TOTAL_PAGES) -> list[dict]:
     for page in range(1, pages + 1):
         coins = fetch_market_data(page)
         all_coins.extend(coins)
+        if page < pages:
+            logger.info(f"Waiting 10s before next page to respect rate limit...")
+            time.sleep(10)
 
     logger.info(f"Extraction complete. Total coins fetched: {len(all_coins)}")
     return all_coins

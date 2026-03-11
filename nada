@@ -1,0 +1,687 @@
+================================================================
+DOCKER — GUÍA COMPLETA PARA ENTENDER Y EXPLICAR EN ENTREVISTA
+CryptoFlow ETL Pipeline
+Alessandro Xavier Kon López
+================================================================
+
+
+----------------------------------------------------------------
+PARTE 1: CONCEPTOS FUNDAMENTALES
+----------------------------------------------------------------
+
+QUÉ ES UNA IMAGEN DE DOCKER
+------------------------------
+Una imagen es una fotografía del sistema. Contiene todo lo que
+un programa necesita para correr: el sistema operativo base,
+el lenguaje de programación, las librerías, y el código.
+
+No es un programa corriendo. Es una plantilla. Como una receta
+de cocina — describe exactamente qué hay que hacer, pero no es
+la comida todavía.
+
+Analogía: una imagen es como el molde para hacer galletas.
+El molde no es la galleta. Pero a partir de ese molde puedes
+hacer todas las galletas que quieras, todas idénticas.
+
+Ejemplo en nuestro proyecto:
+    Nuestra imagen de Airflow contiene:
+    - Ubuntu (sistema operativo base)
+    - Python 3.11
+    - Apache Airflow 2.9
+    - pandas, requests, tenacity, psycopg2
+    - Nuestro código en etl/ y dags/
+    Todo congelado en un snapshot reproducible.
+
+
+QUÉ ES UN CONTENEDOR
+---------------------
+Un contenedor es una imagen corriendo. Es la instancia activa
+de esa plantilla.
+
+Siguiendo la analogía: si la imagen es el molde, el contenedor
+es la galleta que salió de ese molde.
+
+Puedes crear múltiples contenedores a partir de la misma imagen.
+Cada contenedor está aislado — tiene su propio sistema de
+archivos, su propia memoria, su propia red. Lo que pasa dentro
+de un contenedor no afecta a los demás ni a tu computadora.
+
+Analogía más técnica: un contenedor es como una computadora
+virtual muy ligera. Tiene su propio sistema operativo, sus
+propios procesos, su propia red. Pero a diferencia de una
+máquina virtual tradicional, comparte el kernel del sistema
+operativo host — por eso es mucho más rápido y liviano.
+
+Por qué esto importa en ingeniería de datos:
+    Tu pipeline funciona en tu laptop con Python 3.11 y
+    PostgreSQL 16. Lo despliegas en un servidor con Python 3.9
+    y falla. Con Docker, el contenedor lleva su propio Python
+    3.11 adentro. Corre igual en cualquier servidor, en
+    cualquier nube, en cualquier computadora.
+    "It works on my machine" deja de ser un problema.
+
+
+QUÉ ES DOCKER COMPOSE
+----------------------
+Docker Compose es una herramienta para definir y correr
+múltiples contenedores juntos como un sistema.
+
+Un pipeline de datos raramente es solo un programa. Necesitas
+una base de datos, un orquestador, quizás un servidor de caché,
+quizás un broker de mensajes. Cada uno es un contenedor
+separado, pero todos necesitan trabajar juntos.
+
+docker-compose.yml es el archivo de configuración donde defines:
+    - Qué contenedores existen (servicios)
+    - Qué imagen usa cada uno
+    - Cómo se conectan entre sí (redes)
+    - Qué datos persisten (volúmenes)
+    - En qué orden arrancan (depends_on)
+    - Qué puertos exponen al exterior (ports)
+
+Con un solo comando (docker compose up) levantas todo el stack.
+Con otro (docker compose down) lo apagas todo.
+
+Analogía: si cada contenedor es un músico, docker-compose.yml
+es la partitura. Le dice a cada músico qué tocar, cuándo entrar,
+y cómo coordinarse con los demás.
+
+
+QUÉ ES UNA RED DE DOCKER
+-------------------------
+Cuando defines múltiples servicios en un docker-compose.yml,
+Docker crea automáticamente una red virtual privada y conecta
+todos los contenedores a ella.
+
+Dentro de esa red, los contenedores se comunican entre sí
+usando el nombre del servicio como hostname. No necesitan
+saber la IP — Docker resuelve el nombre automáticamente.
+
+Ejemplo en nuestro proyecto:
+    airflow-scheduler necesita conectarse a cryptoflow-db.
+    En lugar de una IP (que cambia), usa el hostname:
+        postgresql+psycopg2://cryptoflow:cryptoflow@cryptoflow-db:5432/cryptoflow
+    Docker sabe que "cryptoflow-db" es el contenedor con ese nombre.
+
+Desde fuera de Docker (tu computadora), los contenedores NO
+son accesibles directamente. Solo puedes llegar a ellos a
+través de los puertos mapeados.
+
+
+QUÉ ES UN VOLUMEN
+-----------------
+Los contenedores son efímeros — cuando los apagas, todo lo
+que estaba dentro desaparece. Esto es un problema para una
+base de datos: no quieres perder todos tus datos cada vez
+que reinicias el contenedor.
+
+Los volúmenes son carpetas especiales que viven FUERA del
+contenedor, administradas por Docker. Los datos persisten
+aunque el contenedor se destruya y se recree.
+
+En nuestro docker-compose.yml definimos dos volúmenes:
+    cryptoflow_db_data:  guarda los datos de crypto
+    airflow_db_data:     guarda los metadatos de Airflow
+
+Analogía: el contenedor es el restaurante. El volumen es la
+bodega de ingredientes que está en un edificio separado.
+Puedes demoler y reconstruir el restaurante — la bodega
+y todos sus ingredientes siguen ahí.
+
+
+QUÉ ES EL DOCKERFILE
+--------------------
+El Dockerfile es la receta para construir tu imagen.
+Es un archivo de instrucciones que Docker ejecuta línea por
+línea para construir la imagen.
+
+Nuestro Dockerfile:
+
+    FROM apache/airflow:2.9.0-python3.11
+        Parte de la imagen oficial de Airflow.
+        No construimos desde cero — extendemos algo que ya funciona.
+
+    USER root
+        Cambia al usuario root para operaciones de sistema.
+
+    USER airflow
+        Regresa al usuario airflow antes de instalar paquetes.
+        Buena práctica de seguridad: nunca instales paquetes
+        como root en producción.
+
+    COPY requirements.txt .
+        Copia el archivo de dependencias al contenedor.
+
+    RUN pip install ...
+        Instala nuestras librerías Python dentro de la imagen.
+
+    COPY etl/ /opt/airflow/etl/
+    COPY dags/ /opt/airflow/dags/
+        Copia nuestro código al contenedor.
+
+CONCEPTO IMPORTANTE — CAPAS:
+    Cada instrucción en el Dockerfile crea una capa.
+    Docker cachea cada capa. Si cambias solo el código en etl/,
+    Docker reutiliza las capas de pip install del caché y solo
+    reconstruye las últimas capas. Por eso el segundo build
+    es mucho más rápido que el primero.
+
+
+QUÉ ES .dockerignore
+--------------------
+Le dice a Docker qué archivos NO copiar dentro de la imagen
+cuando ejecuta los comandos COPY.
+
+Nuestro .dockerignore contiene:
+    .venv          no copies el entorno virtual local
+    .env           NUNCA copies credenciales en una imagen
+    __pycache__    archivos compilados de Python, se regeneran
+    .git           el historial de Git no pertenece a la imagen
+    logs/          los logs los genera Airflow en el contenedor
+    tests/         los tests no se necesitan en producción
+    *.md           documentación, no código ejecutable
+
+Sin .dockerignore, Docker copiaría TODO tu proyecto dentro de
+la imagen — incluyendo tu .env con passwords y tu carpeta .git
+con todo el historial. La imagen sería más pesada e insegura.
+
+Es el equivalente del .gitignore pero para Docker.
+
+
+----------------------------------------------------------------
+PARTE 2: NUESTRA ARQUITECTURA DE CONTENEDORES
+----------------------------------------------------------------
+
+EL STACK COMPLETO DE CRYPTOFLOW
+--------------------------------
+
+    Tu computadora (host)
+    ┌────────────────────────────────────────────────────┐
+    │                                                    │
+    │   Puerto 8080 ──────► airflow-webserver            │
+    │   Puerto 5433 ──────► cryptoflow-db                │
+    │                                                    │
+    │   ┌────────────────────────────────────────────┐  │
+    │   │          Red interna Docker                 │  │
+    │   │                                            │  │
+    │   │  cryptoflow-db      airflow-db             │  │
+    │   │  PostgreSQL 16      PostgreSQL 16          │  │
+    │   │  puerto 5432        puerto 5432            │  │
+    │   │  (tus datos)        (metadatos Airflow)    │  │
+    │   │       │                   │                │  │
+    │   │       └─────────┬─────────┘                │  │
+    │   │                 │                          │  │
+    │   │  airflow-webserver    airflow-scheduler    │  │
+    │   │  UI en :8080          corre los DAGs       │  │
+    │   │                                            │  │
+    │   └────────────────────────────────────────────┘  │
+    └────────────────────────────────────────────────────┘
+
+SERVICIO 1: cryptoflow-db
+    Qué es: PostgreSQL que almacena tus datos de crypto
+    Imagen: postgres:16 (oficial de Docker Hub)
+    Puerto externo: 5433 (para no chocar con tu Postgres local)
+    Puerto interno: 5432
+    Volumen: cryptoflow_db_data (persiste los datos)
+    Init automático: ejecuta 01_, 02_, 03_.sql al primer arranque
+    Healthcheck: pg_isready cada 5 segundos
+
+SERVICIO 2: airflow-db
+    Qué es: PostgreSQL solo para metadatos de Airflow
+    Imagen: postgres:16
+    Puerto: solo interno, no expuesto al host
+    Volumen: airflow_db_data
+    Guarda: DAG runs, task states, logs, conexiones, variables
+
+    Por qué separado de cryptoflow-db:
+        Separación de responsabilidades. Un problema en Airflow
+        no debe poder corromper tus datos de crypto y viceversa.
+        También facilita el backup — puedes respaldar solo
+        cryptoflow-db sin tocar los metadatos de Airflow.
+
+SERVICIO 3: airflow-init
+    Qué es: un contenedor que corre UNA sola vez al arranque
+    Hace:
+        1. airflow db init — crea ~50 tablas internas de Airflow
+        2. airflow users create — crea el usuario admin/admin
+    Después de eso se detiene. No vuelve a correr.
+    restart: on-failure — si falla, Docker lo reintenta.
+
+SERVICIO 4: airflow-webserver
+    Qué es: la interfaz web de Airflow
+    Puerto: 8080 (accesible desde tu navegador)
+    URL: http://localhost:8080
+    Credenciales: admin / admin
+    Qué puedes hacer desde ahí:
+        - Ver todos tus DAGs
+        - Activar/desactivar DAGs
+        - Correr un DAG manualmente
+        - Ver el log de cada tarea
+        - Ver el historial de runs
+        - Ver el gráfico de dependencias de tareas
+
+SERVICIO 5: airflow-scheduler
+    Qué es: el proceso que revisa cada minuto si hay DAGs que correr
+    No tiene UI — corre en background
+    Qué hace:
+        Cada minuto revisa: ¿algún DAG tiene schedule_interval
+        que debería haber corrido y no ha corrido?
+        Si sí, pone las tareas en cola y las ejecuta.
+        Para cryptoflow_daily con @daily, lo corre cada día
+        a medianoche UTC.
+
+
+POR QUÉ DOS BASES DE DATOS POSTGRESQL
+--------------------------------------
+Esta es una pregunta muy común en entrevistas.
+
+Airflow es un orquestador que necesita guardar su propio estado:
+qué DAGs existen, cuándo corrieron, si fallaron, los logs de
+cada tarea, las variables de configuración, las conexiones.
+Todo eso es la base de datos de metadatos de Airflow.
+
+Tus datos de crypto (bronze/silver/gold) son completamente
+diferentes y no tienen nada que ver con el funcionamiento
+interno de Airflow.
+
+Mezclarlos en una sola base de datos sería como guardar las
+actas de una empresa en el mismo cajón que las recetas de
+cocina. Técnicamente funciona, pero es un desastre de
+organización y seguridad.
+
+Separándolos:
+    - Puedes escalar cada base de datos independientemente
+    - Un problema en una no afecta a la otra
+    - Los backups son independientes
+    - En producción estarían en servidores diferentes
+
+
+LOS PORT MAPPINGS
+-----------------
+Los contenedores están aislados. Desde tu computadora no
+puedes conectarte a ellos directamente. Los port mappings
+crean un túnel entre tu máquina y el contenedor.
+
+Formato: "host_port:container_port"
+
+    "5433:5432"
+        Tu máquina puerto 5433 ──► contenedor puerto 5432
+        Usamos 5433 y no 5432 porque tu PostgreSQL local
+        ya ocupa el 5432.
+
+    "8080:8080"
+        Tu máquina puerto 8080 ──► contenedor puerto 8080
+        Así accedes a la UI de Airflow desde el navegador.
+
+Dentro de la red Docker, los contenedores se comunican
+directamente en el puerto 5432 sin mapping — el mapping
+solo aplica para acceso desde fuera de Docker.
+
+
+EL YAML ANCHOR (&) Y ALIAS (*) EN DOCKER-COMPOSE
+--------------------------------------------------
+En nuestro docker-compose.yml verás esto:
+
+    x-airflow-common:
+      &airflow-common
+      build: .
+      environment:
+        ...
+
+    services:
+      airflow-webserver:
+        <<: *airflow-common
+        command: webserver
+
+Esto es YAML puro, no Docker específico.
+
+& define un "anchor" — un bloque de configuración con nombre.
+* referencia ese anchor — copia todo su contenido aquí.
+<< es el operador de merge — fusiona el anchor con las
+   propiedades propias del servicio.
+
+Sin esto, tendríamos que repetir las mismas 20 líneas de
+environment variables en airflow-webserver Y en
+airflow-scheduler. El anchor nos permite escribirlas una
+sola vez y referenciarlas donde se necesiten.
+
+En una entrevista: "Usé YAML anchors para evitar repetición
+de configuración entre los servicios de Airflow. El principio
+DRY — Don't Repeat Yourself — aplica tanto al código como a
+los archivos de configuración."
+
+
+EL HEALTHCHECK
+--------------
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "cryptoflow"]
+      interval: 5s
+      retries: 5
+
+Un healthcheck es una prueba automática que Docker corre
+periodicamente para saber si un contenedor está realmente
+listo para recibir tráfico.
+
+Sin healthcheck, Docker marcaría el contenedor como "running"
+apenas arranca el proceso — pero PostgreSQL tarda unos
+segundos en inicializarse completamente. Si airflow-init
+intenta conectarse antes de que PostgreSQL esté listo, falla.
+
+Con healthcheck, el depends_on espera a que el contenedor
+esté "healthy" (no solo "running") antes de arrancar los
+servicios dependientes.
+
+pg_isready es un comando de PostgreSQL que regresa éxito
+cuando la base de datos está lista para aceptar conexiones.
+
+
+docker-entrypoint-initdb.d — EL INIT AUTOMÁTICO
+-------------------------------------------------
+    volumes:
+      - ./sql:/docker-entrypoint-initdb.d
+
+PostgreSQL tiene una convención especial: cualquier archivo
+.sql o .sh que esté en la carpeta /docker-entrypoint-initdb.d
+se ejecuta automáticamente la PRIMERA VEZ que el contenedor
+arranca y el volumen de datos está vacío.
+
+Nosotros montamos nuestra carpeta ./sql en esa ruta, así
+PostgreSQL ejecuta nuestros scripts automáticamente:
+
+    01_create_schemas.sql  →  CREATE SCHEMA raw, staging, warehouse
+    02_create_tables.sql   →  CREATE TABLE ...
+    03_seed_dimensions.sql →  INSERT INTO warehouse.dim_market_tier
+
+Los archivos se ejecutan en orden ALFABÉTICO — por eso los
+nombramos con prefijo 01_, 02_, 03_.
+
+IMPORTANTE: esto solo ocurre una vez. Si el volumen
+cryptoflow_db_data ya existe (porque ya corriste el stack
+antes), PostgreSQL asume que ya fue inicializado y NO ejecuta
+los scripts de nuevo. Los datos existentes se preservan.
+
+
+----------------------------------------------------------------
+PARTE 3: QUÉ PASA EXACTAMENTE AL CORRER docker compose up --build
+----------------------------------------------------------------
+
+PASO 1: LECTURA DEL docker-compose.yml
+    Docker lee el archivo y entiende qué servicios hay,
+    qué imágenes usan, cómo se conectan, qué volúmenes necesitan.
+
+PASO 2: BUILD DE LA IMAGEN PERSONALIZADA
+    Para los servicios con "build: ." Docker ejecuta el Dockerfile
+    línea por línea:
+        - Descarga apache/airflow:2.9.0-python3.11 de Docker Hub
+          (si no está en caché local)
+        - Cambia a usuario root
+        - Cambia a usuario airflow
+        - Copia requirements.txt
+        - Corre pip install (puede tardar 2-3 minutos)
+        - Copia el código de etl/ y dags/
+        - Guarda el resultado como una imagen en caché local
+
+    Cada instrucción = una capa. Las capas se cachean.
+    Segundo build = mucho más rápido (reutiliza caché).
+
+PASO 3: PULL DE IMÁGENES EXTERNAS
+    Para "image: postgres:16" Docker descarga la imagen oficial
+    de PostgreSQL desde Docker Hub si no está en caché.
+
+PASO 4: CREACIÓN DE LA RED Y VOLÚMENES
+    Docker crea la red virtual interna.
+    Docker crea los volúmenes nombrados si no existen.
+
+PASO 5: ARRANQUE EN ORDEN DE DEPENDENCIAS
+    Docker respeta los depends_on y healthchecks:
+
+    T=0s   cryptoflow-db arranca
+           airflow-db arranca
+
+    T=5s   Docker corre pg_isready en ambas bases de datos
+           Si fallan, espera 5s y reintenta (hasta 5 veces)
+
+    T=10s  (cuando ambas están healthy)
+           airflow-init arranca
+           Corre: airflow db init
+           Corre: airflow users create --username admin --password admin
+           Termina y se detiene.
+
+    T=30s  (cuando airflow-db está healthy)
+           airflow-webserver arranca
+           airflow-scheduler arranca
+
+PASO 6: INIT AUTOMÁTICO DE PostgreSQL
+    Al primer arranque de cryptoflow-db, PostgreSQL detecta
+    que el volumen está vacío y ejecuta los scripts de
+    docker-entrypoint-initdb.d en orden:
+        01_create_schemas.sql
+        02_create_tables.sql
+        03_seed_dimensions.sql
+
+PASO 7: AIRFLOW DESCUBRE LOS DAGS
+    El scheduler escanea la carpeta /opt/airflow/dags/
+    cada cierto tiempo. Encuentra cryptoflow_dag.py y lo
+    registra. Aparece en la UI como "cryptoflow_daily".
+    Está pausado por default (DAGS_ARE_PAUSED_AT_CREATION=true).
+    Tú lo activas manualmente desde la UI.
+
+RESULTADO FINAL:
+    http://localhost:8080  →  Airflow UI (admin/admin)
+    localhost:5433         →  CryptoFlow PostgreSQL
+    El scheduler corre cryptoflow_daily cada día a medianoche UTC
+
+
+----------------------------------------------------------------
+PARTE 4: COMANDOS ESENCIALES DE DOCKER
+----------------------------------------------------------------
+
+LEVANTAR EL STACK
+    docker compose up --build
+        Construye la imagen y levanta todos los servicios.
+        Muestra los logs de todos los contenedores en tiempo real.
+        Ctrl+C para detener (los contenedores siguen en memoria).
+
+    docker compose up --build -d
+        Lo mismo pero en modo detached (background).
+        La terminal queda libre. Los contenedores siguen corriendo.
+
+VER LOGS
+    docker compose logs
+        Logs de todos los servicios.
+
+    docker compose logs airflow-scheduler
+        Logs solo del scheduler.
+
+    docker compose logs -f airflow-scheduler
+        Logs en tiempo real (follow mode). Útil para debugging.
+
+VER ESTADO DE CONTENEDORES
+    docker compose ps
+        Lista todos los contenedores y su estado (running/healthy/stopped).
+
+ENTRAR A UN CONTENEDOR
+    docker compose exec airflow-scheduler bash
+        Abre una terminal dentro del contenedor del scheduler.
+        Útil para debugging — puedes correr Python, psql, etc.
+
+    docker compose exec cryptoflow-db psql -U cryptoflow
+        Abre psql directamente en la base de datos de crypto.
+
+APAGAR EL STACK
+    docker compose down
+        Detiene y elimina los contenedores.
+        Los VOLÚMENES se preservan (los datos no se pierden).
+
+    docker compose down -v
+        Detiene, elimina contenedores Y volúmenes.
+        CUIDADO: esto borra todos los datos de la DB.
+        Útil para empezar completamente desde cero.
+
+RECONSTRUIR SOLO UN SERVICIO
+    docker compose up --build airflow-webserver
+        Reconstruye y reinicia solo el webserver.
+        Útil cuando cambias código en etl/ o dags/.
+
+
+----------------------------------------------------------------
+PARTE 5: CÓMO EXPLICARLO EN UNA ENTREVISTA
+----------------------------------------------------------------
+
+PREGUNTA: "¿Cómo desplegaste/corriste tu pipeline?"
+
+RESPUESTA CORTA:
+    "Dockericé el proyecto completo con docker-compose. Con un
+    solo comando (docker compose up --build) levanto un stack
+    de 5 servicios: dos bases de datos PostgreSQL — una para
+    los datos del pipeline y otra para los metadatos de Airflow
+    — más el webserver y scheduler de Airflow. La base de datos
+    se inicializa automáticamente con los schemas y tablas al
+    primer arranque, y Airflow corre el DAG diariamente de
+    forma autónoma."
+
+RESPUESTA DETALLADA (si preguntan más):
+    "El Dockerfile extiende la imagen oficial de Airflow 2.9 y
+    agrega nuestras dependencias de Python encima. El
+    docker-compose.yml define la arquitectura completa: uso
+    YAML anchors para evitar repetir la configuración entre
+    el webserver y el scheduler. Los datos persisten en
+    volúmenes nombrados para sobrevivir reinicios. Separé la
+    base de datos de Airflow de la base de datos del pipeline
+    por separación de responsabilidades — un problema en los
+    metadatos de Airflow no debe poder afectar los datos de
+    producción. Los port mappings exponen solo los servicios
+    necesarios: Airflow en 8080 y PostgreSQL en 5433 para no
+    chocar con una instalación local."
+
+PREGUNTA: "¿Por qué Docker y no correrlo directamente en tu máquina?"
+
+RESPUESTA:
+    "Reproducibilidad. Sin Docker, el pipeline depende de las
+    versiones exactas de Python, PostgreSQL y las librerías
+    instaladas en esa máquina específica. Con Docker, la imagen
+    contiene todo lo necesario y corre idéntico en cualquier
+    entorno: mi laptop, un servidor de staging, una instancia
+    EC2. También simplifica el onboarding — alguien que clona
+    el repo solo necesita Docker instalado para levantar todo
+    el stack, sin instalar dependencias manualmente."
+
+PREGUNTA: "¿Qué harías diferente en producción?"
+
+RESPUESTA:
+    "Varias cosas. Primero, no usaría credenciales hardcodeadas
+    en el docker-compose.yml — en producción usaría Docker
+    Secrets o variables de entorno inyectadas por el sistema
+    de CI/CD. Segundo, el executor de Airflow sería
+    CeleryExecutor o KubernetesExecutor en lugar de
+    LocalExecutor para escalar las tareas horizontalmente.
+    Tercero, los logs irían a un sistema centralizado como
+    CloudWatch o ELK Stack. Y cuarto, habría un proceso de
+    healthcheck externo que alertara si los contenedores
+    caen — no solo el healthcheck interno de Docker."
+
+PREGUNTA: "¿Qué es un contenedor?"
+
+RESPUESTA:
+    "Un contenedor es una unidad de software que empaqueta
+    código y todas sus dependencias para que la aplicación
+    corra de forma confiable en cualquier entorno. A diferencia
+    de una máquina virtual, un contenedor no virtualiza el
+    hardware completo — comparte el kernel del sistema operativo
+    host, lo que lo hace mucho más ligero y rápido. La imagen
+    es la plantilla inmutable; el contenedor es la instancia
+    en ejecución de esa plantilla."
+
+PREGUNTA: "¿Cuál es la diferencia entre una imagen y un contenedor?"
+
+RESPUESTA:
+    "La relación es la misma que entre una clase y un objeto
+    en programación orientada a objetos. La imagen es la clase
+    — la definición, el blueprint, inmutable. El contenedor
+    es el objeto — la instancia corriendo en memoria, con su
+    propio estado. Puedes crear múltiples contenedores a partir
+    de la misma imagen, cada uno con su propio estado
+    independiente."
+
+
+----------------------------------------------------------------
+PARTE 6: TÉRMINOS CLAVE Y SUS DEFINICIONES
+----------------------------------------------------------------
+
+IMAGEN
+    Snapshot inmutable de un sistema: OS base + dependencias +
+    código. Plantilla para crear contenedores. Se construye
+    con un Dockerfile o se descarga de Docker Hub.
+
+CONTENEDOR
+    Instancia en ejecución de una imagen. Aislado del host y
+    de otros contenedores. Efímero — los datos se pierden al
+    destruirlo a menos que uses volúmenes.
+
+DOCKERFILE
+    Archivo de instrucciones para construir una imagen.
+    Cada instrucción crea una capa que Docker cachea.
+
+DOCKER HUB
+    Repositorio público de imágenes. Como PyPI pero para
+    imágenes Docker. Ahí viven postgres:16, apache/airflow:2.9.0.
+
+DOCKER COMPOSE
+    Herramienta para definir y correr múltiples contenedores
+    como un stack. Configurado con docker-compose.yml.
+
+SERVICIO
+    Un contenedor definido en docker-compose.yml. Cada servicio
+    tiene su imagen, configuración, puertos y volúmenes.
+
+VOLUMEN
+    Almacenamiento persistente que vive fuera del contenedor.
+    Los datos sobreviven reinicios y recreaciones del contenedor.
+
+RED (NETWORK)
+    Red virtual privada que conecta los contenedores de un
+    mismo compose file. Los contenedores se hablan por nombre
+    de servicio como hostname.
+
+PORT MAPPING
+    Túnel entre un puerto del host y un puerto del contenedor.
+    Formato "host:container" — ejemplo: "5433:5432".
+
+HEALTHCHECK
+    Prueba periódica que Docker corre para saber si un
+    contenedor está realmente listo. depends_on espera al
+    estado "healthy" antes de arrancar servicios dependientes.
+
+LAYER (CAPA)
+    Resultado de cada instrucción del Dockerfile. Docker
+    cachea las capas — si una instrucción no cambió, reutiliza
+    la capa del caché en lugar de reconstruirla.
+
+BUILD
+    El proceso de ejecutar el Dockerfile para crear una imagen.
+    --build en docker compose up fuerza la reconstrucción.
+
+YAML ANCHOR (&) / ALIAS (*)
+    Mecanismo de YAML para definir un bloque de configuración
+    una vez y reutilizarlo en múltiples lugares. Evita
+    repetición — principio DRY aplicado a configuración.
+
+LOCAL EXECUTOR
+    El executor de Airflow que corre tareas en el mismo proceso
+    del scheduler. Simple, ideal para desarrollo y proyectos
+    pequeños. En producción a escala se usa CeleryExecutor
+    (tareas distribuidas en workers) o KubernetesExecutor
+    (cada tarea en un pod de Kubernetes).
+
+DOCKER-ENTRYPOINT-INITDB.D
+    Carpeta especial de la imagen oficial de PostgreSQL.
+    Los archivos .sql ahí se ejecutan automáticamente al
+    primer arranque del contenedor. Solo ocurre una vez —
+    cuando el volumen de datos está vacío.
+
+
+----------------------------------------------------------------
+FIN DEL DOCUMENTO
+CryptoFlow ETL Pipeline — Docker Documentation
+Alessandro Xavier Kon López
+----------------------------------------------------------------

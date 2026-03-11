@@ -1,0 +1,129 @@
+# docker-compose.yml
+# ===================
+# Defines all services needed to run the CryptoFlow pipeline locally.
+#
+# Services:
+#   cryptoflow-db   — PostgreSQL database for our data (bronze/silver/gold)
+#   airflow-db      — PostgreSQL database for Airflow's internal metadata
+#   airflow-init    — One-time setup: creates Airflow tables and admin user
+#   airflow-webserver — Airflow UI at http://localhost:8080
+#   airflow-scheduler — Runs the DAGs on schedule
+#
+# 📚 CONCEPT: Why two separate databases?
+#   Airflow needs its own PostgreSQL to store DAG runs, task states,
+#   logs, and connections. This is completely separate from our
+#   cryptoflow data. Mixing them would make both harder to manage.
+
+version: '3.8'
+
+x-airflow-common:
+  # 📚 CONCEPT: YAML anchors (&) and aliases (*)
+  #   This block defines shared config that both airflow services use.
+  #   Without this we would repeat the same environment variables,
+  #   volumes, and depends_on in both webserver and scheduler.
+  &airflow-common
+  build: .
+  environment:
+    &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db:5432/airflow
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    # CryptoFlow DB connection — passed to our ETL code via env vars
+    PYTHONPATH: /opt/airflow
+    DB_HOST: cryptoflow-db
+    DB_PORT: 5432
+    DB_NAME: cryptoflow
+    DB_USER: cryptoflow
+    DB_PASSWORD: cryptoflow
+    COINGECKO_BASE_URL: https://api.coingecko.com/api/v3
+    COINS_PER_PAGE: 100
+    TOTAL_PAGES: 3
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./etl:/opt/airflow/etl
+    - ./logs:/opt/airflow/logs
+  depends_on:
+    airflow-db:
+      condition: service_healthy
+    cryptoflow-db:
+      condition: service_healthy
+
+services:
+
+  # ── CryptoFlow Data Database ───────────────────────────────────────────────
+  cryptoflow-db:
+    image: postgres:16
+    container_name: cryptoflow-db
+    environment:
+      POSTGRES_USER: cryptoflow
+      POSTGRES_PASSWORD: cryptoflow
+      POSTGRES_DB: cryptoflow
+    ports:
+      - "5433:5432"   # 📚 Port 5433 on host to avoid conflict with your
+                      # local PostgreSQL which already uses 5432
+    volumes:
+      - cryptoflow_db_data:/var/lib/postgresql/data
+      - ./sql:/docker-entrypoint-initdb.d   # Auto-runs SQL files on first start
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "cryptoflow"]
+      interval: 5s
+      retries: 5
+
+  # ── Airflow Metadata Database ──────────────────────────────────────────────
+  airflow-db:
+    image: postgres:16
+    container_name: airflow-db
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 5
+
+  # ── Airflow Init (runs once) ───────────────────────────────────────────────
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow-init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db init
+        airflow users create \
+          --username admin \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email admin@cryptoflow.com \
+          --password admin
+    restart: on-failure
+
+  # ── Airflow Webserver ──────────────────────────────────────────────────────
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: airflow-webserver
+    command: webserver
+    ports:
+      - "8080:8080"
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      retries: 5
+
+  # ── Airflow Scheduler ──────────────────────────────────────────────────────
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow-scheduler
+    command: scheduler
+    restart: always
+
+volumes:
+  cryptoflow_db_data:
+  airflow_db_data:
