@@ -289,6 +289,9 @@ LIMIT 10;
 
 
 ---
+## Dashboard
+<img width="1916" height="880" alt="image" src="https://github.com/user-attachments/assets/2f0e475e-4f68-4edd-8f4b-719553d983dc" />
+Live dashboard at **http://localhost:8501** , spun up automatically with `docker compose up`.
 
 ## Roadmap
 
